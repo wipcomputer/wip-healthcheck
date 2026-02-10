@@ -1,0 +1,12 @@
+{
+  "name": "oc-healthcheck",
+  "version": "1.0.0",
+  "description": "External health watchdog for OpenClaw — monitors gateway, tokens, FDs. Auto-remediates and escalates.",
+  "type": "module",
+  "main": "healthcheck.mjs",
+  "scripts": {
+    "check": "node healthcheck.mjs",
+    "install-service": "bash install.sh",
+    "uninstall-service": "bash uninstall.sh"
+  }
+}

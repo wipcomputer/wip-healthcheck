@@ -309,6 +309,85 @@ async function warnAgentAboutTokens(config, state, sessionKey, percent) {
   }
 }
 
+// ─── Memory Health ──────────────────────────────────────────────────────────
+
+function checkMemoryHealth(config) {
+  const ocHome = config.openclawHome;
+  const issues = [];
+
+  // 1. Check for NULL embedding vectors
+  try {
+    const nullCount = execSync(
+      `sqlite3 "${ocHome}/memory/context-embeddings.sqlite" "SELECT COUNT(*) FROM conversation_chunks WHERE embedding IS NULL"`,
+      { encoding: 'utf8', timeout: 10000 }
+    ).trim();
+    const count = parseInt(nullCount, 10);
+    if (count > 10) {
+      issues.push({ check: 'null-vectors', severity: 'error', detail: `${count} chunks with NULL embeddings` });
+    } else if (count > 0) {
+      issues.push({ check: 'null-vectors', severity: 'warn', detail: `${count} chunks with NULL embeddings` });
+    }
+  } catch (err) {
+    issues.push({ check: 'null-vectors', severity: 'error', detail: `DB query failed: ${err.message}` });
+  }
+
+  // 2. Check gateway error log for recent OpenAI key issues
+  try {
+    const logPath = `${ocHome}/logs/gateway.err.log`;
+    if (existsSync(logPath)) {
+      const recent = execSync(
+        `tail -50 "${logPath}" | grep -c "no OpenAI API key" || true`,
+        { encoding: 'utf8', timeout: 5000 }
+      ).trim();
+      const count = parseInt(recent, 10);
+      if (count > 0) {
+        issues.push({ check: 'openai-key', severity: 'error', detail: `${count} "no OpenAI API key" errors in recent gateway log` });
+      }
+    }
+  } catch {}
+
+  // 3. Check session exports are running (latest export should be from today)
+  try {
+    const exportDir = join(process.env.HOME || '/Users/lesa',
+      'Documents/wipcomputer--mac-mini-01/staff/Lēsa/documents/sessions');
+    if (existsSync(exportDir)) {
+      const latest = execSync(
+        `ls -t "${exportDir}" | head -1`,
+        { encoding: 'utf8', timeout: 5000 }
+      ).trim();
+      const today = new Date().toISOString().slice(0, 10);
+      if (latest && !latest.startsWith(today)) {
+        issues.push({ check: 'session-export', severity: 'warn', detail: `Latest export is ${latest}, not from today` });
+      }
+    }
+  } catch {}
+
+  // 4. Check memory-capture-state.json exists
+  try {
+    const statePath = `${ocHome}/memory/memory-capture-state.json`;
+    if (!existsSync(statePath)) {
+      issues.push({ check: 'state-file', severity: 'error', detail: 'memory-capture-state.json missing' });
+    }
+  } catch {}
+
+  // 5. Check Crystal auto-capture (look for recent errors)
+  try {
+    const logPath = `${ocHome}/logs/gateway.err.log`;
+    if (existsSync(logPath)) {
+      const recent = execSync(
+        `tail -50 "${logPath}" | grep -c "memory-crystal.*failed\\|memory-crystal.*error" || true`,
+        { encoding: 'utf8', timeout: 5000 }
+      ).trim();
+      const count = parseInt(recent, 10);
+      if (count > 2) {
+        issues.push({ check: 'crystal-capture', severity: 'error', detail: `${count} crystal errors in recent gateway log` });
+      }
+    }
+  } catch {}
+
+  return issues;
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -402,13 +481,36 @@ async function main() {
     }
   }
 
+  // ── Check 5: Memory system health (every 5th run = ~15 min) ──
+  const checkCount = (state.checkCount || 0) + 1;
+  state.checkCount = checkCount;
+  const runMemoryCheck = checkCount % 5 === 0 || checkCount === 1;
+  const memIssues = runMemoryCheck ? checkMemoryHealth(config) : [];
+  report.checks.memory = runMemoryCheck ? memIssues : 'skipped';
+
+  const memErrors = memIssues.filter(i => i.severity === 'error');
+  if (memErrors.length > 0) {
+    const details = memErrors.map(i => `- ${i.check}: ${i.detail}`).join('\n');
+    log('error', `Memory system issues: ${details}`);
+    await escalate(config, state,
+      'Memory system errors detected',
+      `${memErrors.length} memory health check(s) failed:\n${details}`
+    );
+    report.actions.push({ type: 'memory-alert', issues: memErrors });
+  } else if (memIssues.length > 0) {
+    const details = memIssues.map(i => `- ${i.check}: ${i.detail}`).join('\n');
+    log('warn', `Memory warnings: ${details}`);
+  }
+
   // ── All checks passed ──
   state.consecutiveFailures = 0;
   state.lastCheck = report.ts;
   saveState(state);
 
+  const memSummary = memIssues.length > 0 ? ` mem-issues=${memIssues.length}` : ' mem=ok';
   const summary = `pid=${pid} probe=${probe.ms}ms fds=${fds.count}/${fdCap} sessions=${sessions.length}`
-    + (sessions.length > 0 ? ` max-tokens=${Math.max(...sessions.map(s => s.percent))}%` : '');
+    + (sessions.length > 0 ? ` max-tokens=${Math.max(...sessions.map(s => s.percent))}%` : '')
+    + memSummary;
   log('info', `OK — ${summary}`);
 }
 

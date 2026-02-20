@@ -1,12 +1,21 @@
 {
-  "name": "oc-healthcheck",
-  "version": "1.0.0",
-  "description": "External health watchdog for OpenClaw — monitors gateway, tokens, FDs. Auto-remediates and escalates.",
+  "name": "wip-healthcheck",
+  "version": "2.0.0",
+  "description": "External health watchdog + backup system for OpenClaw / LDM OS. Monitors gateway, tokens, FDs, memory. Auto-remediates and escalates.",
   "type": "module",
   "main": "healthcheck.mjs",
   "scripts": {
     "check": "node healthcheck.mjs",
+    "backup": "bash backup.sh",
+    "verify": "bash verify-backup.sh",
     "install-service": "bash install.sh",
+    "install-backup": "bash install-backup.sh",
     "uninstall-service": "bash uninstall.sh"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wipcomputer/wip-healthcheck.git"
+  },
+  "author": "Parker Todd Brooks",
+  "license": "MIT"
 }

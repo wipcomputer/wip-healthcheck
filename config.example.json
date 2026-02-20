@@ -1,0 +1,37 @@
+{
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 18789,
+    "token": "",
+    "plistLabel": "ai.openclaw.gateway"
+  },
+  "thresholds": {
+    "fdWarningPct": 80,
+    "tokenWarningPct": 80,
+    "tokenCriticalPct": 92,
+    "maxRestartsPerWindow": 3,
+    "restartWindowMinutes": 15,
+    "probeTimeoutMs": 5000
+  },
+  "escalation": {
+    "escalationContact": "",
+    "model": "",
+    "viaAgent": true,
+    "cooldownMinutes": 15
+  },
+  "paths": {
+    "openclawHome": "",
+    "sessionExports": "",
+    "backupRoot": "",
+    "backupExpectedFiles": [
+      "crystal.db",
+      "context-embeddings.sqlite",
+      "main.sqlite",
+      "openclaw.json"
+    ]
+  },
+  "backup": {
+    "retentionDays": 7,
+    "sources": []
+  }
+}

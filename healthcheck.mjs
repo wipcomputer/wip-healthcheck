@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// oc-healthcheck — External health watchdog for OpenClaw
+// wip-healthcheck — External health watchdog for OpenClaw / LDM OS
 // Zero npm dependencies. Runs via LaunchAgent every 3 minutes.
-// Monitors: gateway process, HTTP probe, file descriptors, token usage.
+// Monitors: gateway process, HTTP probe, file descriptors, token usage, memory systems.
 // Auto-remediates: restarts gateway, warns agent about tokens.
-// Escalates to Parker via Lēsa (chatCompletions) or direct iMessage.
+// Escalates via agent (chatCompletions) or direct iMessage fallback.
 
 import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -36,11 +36,16 @@ const DEFAULTS = {
     probeTimeoutMs: 5000,
   },
   escalation: {
-    parkerContact: '',    // iMessage address — set in config.json
-    viaLesa: true,        // try Lēsa first, direct iMessage as fallback
-    cooldownMinutes: 15,  // min time between escalations
+    escalationContact: '',    // iMessage address for fallback — set in config.json
+    model: '',                // model for agent messages (empty = use gateway default)
+    viaAgent: true,           // try agent first, direct iMessage as fallback
+    cooldownMinutes: 15,      // min time between escalations
   },
-  openclawHome: '/Users/lesa/.openclaw',
+  paths: {
+    openclawHome: process.env.OPENCLAW_HOME || join(process.env.HOME || '', '.openclaw'),
+    sessionExports: '',       // path to session export dir (skip check if empty)
+    backupRoot: '',           // path to backup root dir (skip check if empty)
+  },
 };
 
 function deepMerge(target, source) {
@@ -62,10 +67,24 @@ function loadConfig() {
   }
   const config = deepMerge(DEFAULTS, user);
 
+  // Backwards compat: support old flat openclawHome key
+  if (config.openclawHome && !user.paths?.openclawHome) {
+    config.paths.openclawHome = config.openclawHome;
+  }
+  delete config.openclawHome;
+
+  // Backwards compat: support old parkerContact / viaLesa keys
+  if (user.escalation?.parkerContact && !user.escalation?.escalationContact) {
+    config.escalation.escalationContact = user.escalation.parkerContact;
+  }
+  if (user.escalation?.viaLesa !== undefined && user.escalation?.viaAgent === undefined) {
+    config.escalation.viaAgent = user.escalation.viaLesa;
+  }
+
   // Auto-load gateway token from openclaw.json if not set
   if (!config.gateway.token) {
     try {
-      const oc = JSON.parse(readFileSync(join(config.openclawHome, 'openclaw.json'), 'utf8'));
+      const oc = JSON.parse(readFileSync(join(config.paths.openclawHome, 'openclaw.json'), 'utf8'));
       config.gateway.token = oc.gateway?.auth?.token || '';
     } catch {}
   }
@@ -208,13 +227,14 @@ function restartGateway(config, state) {
 
 // ─── Escalation ────────────────────────────────────────────────────────────
 
-function sendToLesa(config, message) {
+function sendToAgent(config, message) {
   return new Promise((resolve) => {
-    const body = JSON.stringify({
-      model: 'anthropic/claude-opus-4-6',
+    const payload = {
       messages: [{ role: 'user', content: message }],
       user: 'healthcheck',
-    });
+    };
+    if (config.escalation.model) payload.model = config.escalation.model;
+    const body = JSON.stringify(payload);
     const req = request({
       hostname: config.gateway.host,
       port: config.gateway.port,
@@ -263,30 +283,30 @@ async function escalate(config, state, subject, details) {
 
   const alert = `[oc-healthcheck] ${subject}\n\n${details}`;
 
-  // Try Lēsa first (she'll iMessage Parker)
-  if (config.escalation.viaLesa) {
-    log('info', `Escalating via Lēsa: ${subject}`);
-    const result = await sendToLesa(config,
-      `URGENT — health monitor alert. iMessage Parker immediately:\n\n${alert}`
+  // Try agent first (via chatCompletions endpoint)
+  if (config.escalation.viaAgent) {
+    log('info', `Escalating via agent: ${subject}`);
+    const result = await sendToAgent(config,
+      `URGENT health monitor alert. Notify the operator immediately:\n\n${alert}`
     );
     if (result.ok) {
       state.lastEscalation = now;
-      log('info', 'Escalation sent via Lēsa');
+      log('info', 'Escalation sent via agent');
       return;
     }
-    log('warn', `Lēsa escalation failed (${result.error || result.statusCode}), trying direct iMessage`);
+    log('warn', `Agent escalation failed (${result.error || result.statusCode}), trying direct iMessage`);
   }
 
   // Fallback: direct iMessage
-  if (config.escalation.parkerContact) {
-    if (sendDirectIMessage(config.escalation.parkerContact, alert)) {
+  if (config.escalation.escalationContact) {
+    if (sendDirectIMessage(config.escalation.escalationContact, alert)) {
       state.lastEscalation = now;
       log('info', 'Escalation sent via direct iMessage');
     } else {
       log('error', 'Direct iMessage failed');
     }
   } else {
-    log('error', 'No escalation path — Lēsa unreachable, no Parker contact configured');
+    log('error', 'No escalation path. Agent unreachable, no escalationContact configured');
   }
 }
 
@@ -295,12 +315,12 @@ async function warnAgentAboutTokens(config, state, sessionKey, percent) {
   const now = Date.now();
   if (state.lastTokenWarning && now - state.lastTokenWarning < 10 * 60 * 1000) return;
 
-  const msg = `[oc-healthcheck] Your session "${sessionKey}" is at ${percent}% token capacity. `
+  const msg = `[wip-healthcheck] Your session "${sessionKey}" is at ${percent}% token capacity. `
     + (percent >= 92
-      ? 'CRITICAL — finish your current task immediately and let compaction run. iMessage Parker if stuck.'
+      ? 'CRITICAL. Finish your current task immediately and let compaction run. Alert the operator if stuck.'
       : 'Consider wrapping up soon to avoid hitting the wall.');
 
-  const result = await sendToLesa(config, msg);
+  const result = await sendToAgent(config, msg);
   if (result.ok) {
     state.lastTokenWarning = now;
     log('info', `Token warning sent to agent (${percent}%)`);
@@ -312,7 +332,7 @@ async function warnAgentAboutTokens(config, state, sessionKey, percent) {
 // ─── Memory Health ──────────────────────────────────────────────────────────
 
 function checkMemoryHealth(config) {
-  const ocHome = config.openclawHome;
+  const ocHome = config.paths.openclawHome;
   const issues = [];
 
   // 1. Check for NULL embedding vectors
@@ -347,20 +367,21 @@ function checkMemoryHealth(config) {
   } catch {}
 
   // 3. Check session exports are running (latest export should be from today)
-  try {
-    const exportDir = join(process.env.HOME || '/Users/lesa',
-      'Documents/wipcomputer--mac-mini-01/staff/Lēsa/documents/sessions');
-    if (existsSync(exportDir)) {
-      const latest = execSync(
-        `ls -t "${exportDir}" | head -1`,
-        { encoding: 'utf8', timeout: 5000 }
-      ).trim();
-      const today = new Date().toISOString().slice(0, 10);
-      if (latest && !latest.startsWith(today)) {
-        issues.push({ check: 'session-export', severity: 'warn', detail: `Latest export is ${latest}, not from today` });
+  if (config.paths.sessionExports) {
+    try {
+      const exportDir = config.paths.sessionExports;
+      if (existsSync(exportDir)) {
+        const latest = execSync(
+          `ls -t "${exportDir}" | head -1`,
+          { encoding: 'utf8', timeout: 5000 }
+        ).trim();
+        const today = new Date().toISOString().slice(0, 10);
+        if (latest && !latest.startsWith(today)) {
+          issues.push({ check: 'session-export', severity: 'warn', detail: `Latest export is ${latest}, not from today` });
+        }
       }
-    }
-  } catch {}
+    } catch {}
+  }
 
   // 4. Check memory-capture-state.json exists
   try {

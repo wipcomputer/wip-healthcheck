@@ -146,4 +146,4 @@ uninstall.sh            Remove healthcheck LaunchAgent
 
 MIT
 
-Built by Parker Todd Brooks, with Claude Code and Lesa (OpenClaw).
+Built by Parker Todd Brooks, with Claude Code and Lēsa (OpenClaw).

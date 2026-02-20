@@ -62,8 +62,15 @@ function deepMerge(target, source) {
 
 function loadConfig() {
   let user = {};
-  if (existsSync(CONFIG_PATH)) {
-    try { user = JSON.parse(readFileSync(CONFIG_PATH, 'utf8')); } catch {}
+  // Check local config first, then standard install location
+  const configPaths = [
+    CONFIG_PATH,
+    join(process.env.OPENCLAW_HOME || join(process.env.HOME || '', '.openclaw'), 'wip-healthcheck', 'config.json'),
+  ];
+  for (const p of configPaths) {
+    if (existsSync(p)) {
+      try { user = JSON.parse(readFileSync(p, 'utf8')); break; } catch {}
+    }
   }
   const config = deepMerge(DEFAULTS, user);
 

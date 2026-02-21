@@ -1,7 +1,7 @@
 {
   "name": "wip-healthcheck",
   "version": "2.0.0",
-  "description": "External health watchdog + backup system for OpenClaw / LDM OS. Monitors gateway, tokens, FDs, memory. Auto-remediates and escalates.",
+  "description": "External health watchdog + backup system. Monitors gateway, tokens, memory. Auto-remediates and escalates.",
   "type": "module",
   "main": "healthcheck.mjs",
   "scripts": {

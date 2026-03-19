@@ -7,7 +7,7 @@ LABEL="ai.openclaw.healthcheck"
 PLIST_DST="$HOME/Library/LaunchAgents/$LABEL.plist"
 NODE_PATH="$(which node)"
 SCRIPT_PATH="$SCRIPT_DIR/healthcheck.mjs"
-LOG_DIR="/tmp/openclaw"
+LOG_DIR="$HOME/.ldm/logs"
 
 # Ensure log dir exists
 mkdir -p "$LOG_DIR"

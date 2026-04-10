@@ -142,10 +142,13 @@ function httpProbe(config) {
   return new Promise((resolve) => {
     const timeout = config.thresholds.probeTimeoutMs;
     const start = Date.now();
+    // Probe /health, not /. The gateway returns 503 at / when Control UI
+    // assets are missing, but /health is the canonical liveness endpoint
+    // and returns {"ok":true,"status":"live"} whenever the gateway is up.
     const req = request({
       hostname: config.gateway.host,
       port: config.gateway.port,
-      path: '/',
+      path: '/health',
       method: 'GET',
       timeout,
     }, (res) => {

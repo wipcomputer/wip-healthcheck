@@ -5,7 +5,10 @@ import {
   decideGatewayHealth,
   evaluateRestartBudget,
   inspectGatewayIdentity,
+  parseListeningPorts,
+  parseWatchdogConfig,
   probeGatewayEndpoints,
+  validateWatchdogConfig,
 } from '../gateway-health.mjs';
 
 const config = {
@@ -27,7 +30,10 @@ const config = {
 function identity(overrides = {}) {
   return {
     servicePid: 4242,
-    listenerPids: [4242],
+    serviceListenerPorts: [18889],
+    configuredPortPids: [4242],
+    portMatchesConfig: true,
+    configurationError: null,
     ownsListener: true,
     diagnosticPatternMatched: false,
     ...overrides,
@@ -51,7 +57,13 @@ test('healthy renamed gateway process does not restart', () => {
 
 test('stale or missing launchd pid is detected', () => {
   const decision = decideGatewayHealth({
-    identity: identity({ servicePid: null, listenerPids: [], ownsListener: false }),
+    identity: identity({
+      servicePid: null,
+      serviceListenerPorts: [],
+      configuredPortPids: [],
+      portMatchesConfig: false,
+      ownsListener: false,
+    }),
     probes: greenProbes,
   });
   assert.deepEqual(decision, {
@@ -63,7 +75,7 @@ test('stale or missing launchd pid is detected', () => {
 
 test('foreign listener is rejected', () => {
   const decision = decideGatewayHealth({
-    identity: identity({ listenerPids: [9001], ownsListener: false }),
+    identity: identity({ configuredPortPids: [9001], ownsListener: false }),
     probes: greenProbes,
   });
   assert.equal(decision.action, 'restart');
@@ -127,13 +139,14 @@ test('stale token fails the authenticated identity probe', async () => {
   assert.equal(probes.authenticated.statusCode, 401);
 });
 
-test('gateway port and launchd pid come from config and service state', () => {
+test('gateway port and listener ownership come from launchd service state', () => {
   const calls = [];
   const result = inspectGatewayIdentity(config, {
     uid: 501,
     run(file, args) {
       calls.push([file, args]);
       if (file === 'launchctl') return 'pid = 4242\nstate = running';
+      if (file === 'lsof' && args.includes('-Fn')) return 'p4242\nn*:18889\n';
       if (file === 'lsof') return '4242\n';
       if (file === 'pgrep') throw new Error('no diagnostic match');
       throw new Error(`unexpected command: ${file}`);
@@ -142,12 +155,60 @@ test('gateway port and launchd pid come from config and service state', () => {
 
   assert.equal(result.servicePid, 4242);
   assert.equal(result.port, 18889);
+  assert.deepEqual(result.serviceListenerPorts, [18889]);
   assert.equal(result.ownsListener, true);
   assert.equal(result.diagnosticPatternMatched, false);
   assert.deepEqual(calls[1], [
     'lsof',
+    ['-nP', '-a', '-p', '4242', '-iTCP', '-sTCP:LISTEN', '-Fn'],
+  ]);
+  assert.deepEqual(calls[2], [
+    'lsof',
     ['-nP', '-iTCP:18889', '-sTCP:LISTEN', '-t'],
   ]);
+});
+
+test('stale watchdog port cannot restart a healthy launchd service', () => {
+  const staleConfig = structuredClone(config);
+  staleConfig.gateway.port = 18789;
+  const result = inspectGatewayIdentity(staleConfig, {
+    uid: 501,
+    run(file, args) {
+      if (file === 'launchctl') return 'pid = 4242\nstate = running';
+      if (file === 'lsof' && args.includes('-Fn')) return 'p4242\nn*:18889\n';
+      if (file === 'lsof') return '';
+      if (file === 'pgrep') return '';
+      throw new Error(`unexpected command: ${file}`);
+    },
+  });
+  const decision = decideGatewayHealth({ identity: result, probes: greenProbes });
+
+  assert.equal(result.configurationError, 'configured gateway port 18789 does not match launchd service listener(s): 18889');
+  assert.deepEqual(decision, {
+    action: 'configuration-error',
+    reason: 'gateway-port-mismatch',
+    detail: result.configurationError,
+    probeFailures: 0,
+  });
+});
+
+test('listening ports are parsed from lsof field output', () => {
+  assert.deepEqual(parseListeningPorts('p4242\nn127.0.0.1:18889\nn[::1]:18890\n'), [18889, 18890]);
+});
+
+test('malformed watchdog configuration fails closed', () => {
+  assert.throws(
+    () => parseWatchdogConfig('{not-json'),
+    /Invalid watchdog config/,
+  );
+  assert.throws(
+    () => validateWatchdogConfig({ ...config, gateway: { ...config.gateway, port: 'not-a-port' } }),
+    /Invalid gateway port/,
+  );
+  assert.throws(
+    () => validateWatchdogConfig({ ...config, thresholds: { ...config.thresholds, probeTimeoutMs: 0 } }),
+    /Invalid thresholds\.probeTimeoutMs/,
+  );
 });
 
 test('restart rate limiting preserves the configured rolling window', () => {

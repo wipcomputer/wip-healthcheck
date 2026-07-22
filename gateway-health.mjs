@@ -6,15 +6,15 @@ function defaultRun(file, args, timeout = 5000) {
 }
 
 function requireGatewayPort(config) {
-  const port = Number(config.gateway.port);
+  const port = Number(config.gateway?.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error(`Invalid gateway port: ${config.gateway.port}`);
+    throw new Error(`Invalid gateway port: ${config.gateway?.port}`);
   }
   return port;
 }
 
 function requireServiceLabel(config) {
-  const label = String(config.gateway.plistLabel || '').trim();
+  const label = String(config.gateway?.plistLabel || '').trim();
   if (!/^[A-Za-z0-9._-]+$/.test(label)) {
     throw new Error(`Invalid launchd service label: ${label || '(empty)'}`);
   }
@@ -37,6 +37,53 @@ function parsePidList(output) {
   )];
 }
 
+export function parseListeningPorts(output) {
+  const ports = [];
+  for (const line of String(output).split('\n')) {
+    const match = line.match(/(?:^n|\s)(?:\[[^\]]+\]|[^:\s]+):(\d+)(?:\s|$|\s*\(LISTEN\))/);
+    if (!match) continue;
+    const port = Number(match[1]);
+    if (Number.isInteger(port) && port > 0 && port <= 65535) ports.push(port);
+  }
+  return [...new Set(ports)].sort((a, b) => a - b);
+}
+
+export function validateWatchdogConfig(config) {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    throw new Error('Watchdog config must be a JSON object');
+  }
+  requireGatewayPort(config);
+  requireServiceLabel(config);
+  if (!config.gateway.host || typeof config.gateway.host !== 'string') {
+    throw new Error('Invalid gateway host');
+  }
+  const positiveNumbers = [
+    ['thresholds.probeTimeoutMs', config.thresholds?.probeTimeoutMs],
+    ['thresholds.gatewayProbeFailureThreshold', config.thresholds?.gatewayProbeFailureThreshold],
+    ['thresholds.maxRestartsPerWindow', config.thresholds?.maxRestartsPerWindow],
+    ['thresholds.restartWindowMinutes', config.thresholds?.restartWindowMinutes],
+  ];
+  for (const [name, value] of positiveNumbers) {
+    if (!Number.isFinite(Number(value)) || Number(value) <= 0) {
+      throw new Error(`Invalid ${name}: ${value}`);
+    }
+  }
+  return config;
+}
+
+export function parseWatchdogConfig(raw, source = 'watchdog config') {
+  let config;
+  try {
+    config = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`Invalid ${source}: ${error.message}`);
+  }
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    throw new Error(`Invalid ${source}: root must be an object`);
+  }
+  return config;
+}
+
 export function inspectGatewayIdentity(config, options = {}) {
   const run = options.run ?? defaultRun;
   const uid = String(options.uid ?? process.getuid?.() ?? run('id', ['-u']));
@@ -52,14 +99,30 @@ export function inspectGatewayIdentity(config, options = {}) {
     serviceError = error instanceof Error ? error.message : String(error);
   }
 
-  let listenerPids = [];
+  let serviceListenerPorts = [];
+  if (servicePid) {
+    try {
+      serviceListenerPorts = parseListeningPorts(
+        run('lsof', ['-nP', '-a', '-p', String(servicePid), '-iTCP', '-sTCP:LISTEN', '-Fn'], 5000),
+      );
+    } catch {
+      serviceListenerPorts = [];
+    }
+  }
+
+  let configuredPortPids = [];
   try {
-    listenerPids = parsePidList(
+    configuredPortPids = parsePidList(
       run('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], 5000),
     );
   } catch {
-    listenerPids = [];
+    configuredPortPids = [];
   }
+
+  const portMatchesConfig = serviceListenerPorts.includes(port);
+  const configurationError = servicePid && serviceListenerPorts.length > 0 && !portMatchesConfig
+    ? `configured gateway port ${port} does not match launchd service listener(s): ${serviceListenerPorts.join(', ')}`
+    : null;
 
   const processPattern = String(config.gateway.processPattern || '').trim();
   let diagnosticPatternMatched = null;
@@ -79,8 +142,11 @@ export function inspectGatewayIdentity(config, options = {}) {
     port,
     servicePid,
     serviceError,
-    listenerPids,
-    ownsListener: servicePid !== null && listenerPids.includes(servicePid),
+    serviceListenerPorts,
+    configuredPortPids,
+    portMatchesConfig,
+    configurationError,
+    ownsListener: servicePid !== null && portMatchesConfig && configuredPortPids.includes(servicePid),
     processPattern: processPattern || null,
     diagnosticPatternMatched,
   };
@@ -149,13 +215,21 @@ export function decideGatewayHealth(params) {
     probeFailureThreshold = 2,
   } = params;
 
+  if (identity.configurationError) {
+    return {
+      action: 'configuration-error',
+      reason: 'gateway-port-mismatch',
+      detail: identity.configurationError,
+      probeFailures: 0,
+    };
+  }
   if (!identity.servicePid) {
-    if (identity.listenerPids.length > 0) {
+    if (identity.configuredPortPids.length > 0) {
       return { action: 'restart', reason: 'foreign-listener', probeFailures: 0 };
     }
     return { action: 'restart', reason: 'service-absent', probeFailures: 0 };
   }
-  if (identity.listenerPids.length === 0) {
+  if (identity.serviceListenerPorts.length === 0) {
     return { action: 'restart', reason: 'owned-listener-absent', probeFailures: 0 };
   }
   if (!identity.ownsListener) {

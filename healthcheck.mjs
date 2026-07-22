@@ -14,16 +14,19 @@ import {
   decideGatewayHealth,
   evaluateRestartBudget,
   inspectGatewayIdentity,
+  parseWatchdogConfig,
   probeGatewayEndpoints,
+  validateWatchdogConfig,
 } from './gateway-health.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const RUNTIME_HOME = process.env.WIP_HEALTHCHECK_HOME || __dirname;
 
 // ─── Config & State ────────────────────────────────────────────────────────
 
-const CONFIG_PATH = join(__dirname, 'config.json');
-const STATE_PATH = join(__dirname, 'state.json');
-const LOG_DIR = join(__dirname, 'logs');
+const CONFIG_PATH = join(RUNTIME_HOME, 'config.json');
+const STATE_PATH = join(RUNTIME_HOME, 'state.json');
+const LOG_DIR = join(RUNTIME_HOME, 'logs');
 
 const DEFAULTS = {
   gateway: {
@@ -70,14 +73,16 @@ function deepMerge(target, source) {
 
 function loadConfig() {
   let user = {};
-  // Check local config first, then standard install location
-  const configPaths = [
-    CONFIG_PATH,
-    join(process.env.OPENCLAW_HOME || join(process.env.HOME || '', '.openclaw'), 'wip-healthcheck', 'config.json'),
-  ];
+  const standardConfigPath = join(
+    process.env.OPENCLAW_HOME || join(process.env.HOME || '', '.openclaw'),
+    'wip-healthcheck',
+    'config.json',
+  );
+  const configPaths = [...new Set([CONFIG_PATH, standardConfigPath])];
   for (const p of configPaths) {
     if (existsSync(p)) {
-      try { user = JSON.parse(readFileSync(p, 'utf8')); break; } catch {}
+      user = parseWatchdogConfig(readFileSync(p, 'utf8'), `watchdog config ${p}`);
+      break;
     }
   }
   const config = deepMerge(DEFAULTS, user);
@@ -104,7 +109,7 @@ function loadConfig() {
     } catch {}
   }
 
-  return config;
+  return validateWatchdogConfig(config);
 }
 
 function loadState() {
@@ -442,6 +447,16 @@ async function main() {
 
   if (decision.action === 'observe') {
     log('warn', `Gateway probes failed (${decision.failedProbes.join(', ')}); waiting for threshold ${config.thresholds.gatewayProbeFailureThreshold}`);
+    state.consecutiveFailures++;
+    state.lastCheck = report.ts;
+    saveState(state);
+    log('info', `Check done: ${JSON.stringify(report)}`);
+    return;
+  }
+
+  if (decision.action === 'configuration-error') {
+    log('error', `Gateway configuration error (${decision.detail}); remediation disabled`);
+    state.consecutiveGatewayProbeFailures = 0;
     state.consecutiveFailures++;
     state.lastCheck = report.ts;
     saveState(state);

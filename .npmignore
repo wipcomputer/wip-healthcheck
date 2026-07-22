@@ -1,0 +1,6 @@
+ai/
+.claude/
+.worktrees/
+_trash/
+.DS_Store
+CLAUDE.md

@@ -3,7 +3,8 @@
     "host": "127.0.0.1",
     "port": 18789,
     "token": "",
-    "plistLabel": "ai.openclaw.gateway"
+    "plistLabel": "ai.openclaw.gateway",
+    "processPattern": "openclaw-gateway"
   },
   "thresholds": {
     "fdWarningPct": 80,
@@ -11,7 +12,8 @@
     "tokenCriticalPct": 92,
     "maxRestartsPerWindow": 3,
     "restartWindowMinutes": 15,
-    "probeTimeoutMs": 5000
+    "probeTimeoutMs": 5000,
+    "gatewayProbeFailureThreshold": 2
   },
   "escalation": {
     "escalationContact": "",

@@ -5,6 +5,7 @@
   "type": "module",
   "main": "healthcheck.mjs",
   "scripts": {
+    "test": "node --test test/*.test.mjs",
     "check": "node healthcheck.mjs",
     "backup": "bash backup.sh",
     "verify": "bash verify-backup.sh",

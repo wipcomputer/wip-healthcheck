@@ -5,11 +5,17 @@
 // Auto-remediates: restarts gateway, warns agent about tokens.
 // Escalates via agent (chatCompletions) or direct iMessage fallback.
 
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { request } from 'node:http';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  decideGatewayHealth,
+  evaluateRestartBudget,
+  inspectGatewayIdentity,
+  probeGatewayEndpoints,
+} from './gateway-health.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -25,6 +31,7 @@ const DEFAULTS = {
     port: 18789,
     token: '',            // auto-loaded from openclaw.json if empty
     plistLabel: 'ai.openclaw.gateway',
+    processPattern: 'openclaw-gateway', // diagnostic only; never restart authority
   },
   thresholds: {
     fdWarningPct: 80,
@@ -34,6 +41,7 @@ const DEFAULTS = {
     maxRestartsPerWindow: 3,
     restartWindowMinutes: 15,
     probeTimeoutMs: 5000,
+    gatewayProbeFailureThreshold: 2,
   },
   escalation: {
     escalationContact: '',    // iMessage address for fallback — set in config.json
@@ -128,39 +136,6 @@ function log(level, msg) {
 
 // ─── Health Checks ─────────────────────────────────────────────────────────
 
-function getGatewayPid() {
-  try {
-    const out = execSync('pgrep -f openclaw-gateway', { encoding: 'utf8', timeout: 5000 });
-    const pids = out.trim().split('\n').filter(Boolean).map(Number);
-    return pids[0] || null;
-  } catch {
-    return null;
-  }
-}
-
-function httpProbe(config) {
-  return new Promise((resolve) => {
-    const timeout = config.thresholds.probeTimeoutMs;
-    const start = Date.now();
-    // Probe /health, not /. The gateway returns 503 at / when Control UI
-    // assets are missing, but /health is the canonical liveness endpoint
-    // and returns {"ok":true,"status":"live"} whenever the gateway is up.
-    const req = request({
-      hostname: config.gateway.host,
-      port: config.gateway.port,
-      path: '/health',
-      method: 'GET',
-      timeout,
-    }, (res) => {
-      res.resume();
-      resolve({ ok: res.statusCode < 500, statusCode: res.statusCode, ms: Date.now() - start });
-    });
-    req.on('error', (err) => resolve({ ok: false, error: err.message, ms: Date.now() - start }));
-    req.on('timeout', () => { req.destroy(); resolve({ ok: false, error: 'timeout', ms: timeout }); });
-    req.end();
-  });
-}
-
 function getFdCount(pid) {
   if (!pid) return { count: 0, limit: null };
   try {
@@ -211,20 +186,21 @@ function getTokenUsage() {
 // ─── Remediation ───────────────────────────────────────────────────────────
 
 function restartGateway(config, state) {
-  const now = Date.now();
-  const window = config.thresholds.restartWindowMinutes * 60 * 1000;
-  state.restarts = (state.restarts || []).filter(t => now - t < window);
+  const budget = evaluateRestartBudget(config, state);
 
-  if (state.restarts.length >= config.thresholds.maxRestartsPerWindow) {
+  if (!budget.allowed) {
     log('error', `Restart rate exceeded (${state.restarts.length}/${config.thresholds.maxRestartsPerWindow} in ${config.thresholds.restartWindowMinutes}m)`);
     return { success: false, reason: 'rate-limited' };
   }
 
   try {
-    const uid = execSync('id -u', { encoding: 'utf8' }).trim();
+    const uid = String(process.getuid?.() ?? execFileSync('id', ['-u'], { encoding: 'utf8' }).trim());
     log('warn', `Restarting gateway (attempt ${state.restarts.length + 1}/${config.thresholds.maxRestartsPerWindow})`);
-    execSync(`launchctl kickstart -k gui/${uid}/${config.gateway.plistLabel}`, { encoding: 'utf8', timeout: 15000 });
-    state.restarts.push(now);
+    execFileSync('launchctl', ['kickstart', '-k', `gui/${uid}/${config.gateway.plistLabel}`], {
+      encoding: 'utf8',
+      timeout: 15000,
+    });
+    state.restarts.push(budget.now);
 
     // Wait a beat for gateway to come back
     execSync('sleep 3');
@@ -425,23 +401,66 @@ async function main() {
   const config = loadConfig();
   const state = loadState();
   const report = { ts: new Date().toISOString(), checks: {}, actions: [] };
+  const reenablePreflight = process.argv.includes('--reenable-preflight');
 
-  // ── Check 1: Gateway process alive ──
-  const pid = getGatewayPid();
-  report.checks.process = { pid };
+  // Check 1: bind the launchd service PID to the configured listener.
+  const identity = inspectGatewayIdentity(config);
+  report.checks.identity = identity;
+  const canProbe = identity.servicePid !== null && identity.ownsListener;
+  const probes = canProbe
+    ? await probeGatewayEndpoints(config, { includeAuthenticated: reenablePreflight })
+    : {
+        healthz: { ok: false, error: 'identity check failed' },
+        readyz: { ok: false, error: 'identity check failed' },
+        ...(reenablePreflight
+          ? { authenticated: { ok: false, error: 'identity check failed' } }
+          : {}),
+      };
+  report.checks.http = probes;
 
-  if (!pid) {
-    log('error', 'Gateway process not found — attempting restart');
+  if (reenablePreflight) {
+    const allGreen = identity.servicePid !== null
+      && identity.ownsListener
+      && Object.values(probes).every((probe) => probe.ok);
+    if (!allGreen) {
+      log('error', `Re-enable preflight failed: ${JSON.stringify(report.checks)}`);
+      process.exitCode = 1;
+      return;
+    }
+    log('info', `Re-enable preflight passed: service pid ${identity.servicePid}, owned port ${identity.port}, authenticated probe 200`);
+    return;
+  }
+
+  const decision = decideGatewayHealth({
+    identity,
+    probes,
+    previousProbeFailures: state.consecutiveGatewayProbeFailures || 0,
+    probeFailureThreshold: config.thresholds.gatewayProbeFailureThreshold,
+  });
+  report.checks.gateway = decision;
+  state.consecutiveGatewayProbeFailures = decision.probeFailures;
+
+  if (decision.action === 'observe') {
+    log('warn', `Gateway probes failed (${decision.failedProbes.join(', ')}); waiting for threshold ${config.thresholds.gatewayProbeFailureThreshold}`);
+    state.consecutiveFailures++;
+    state.lastCheck = report.ts;
+    saveState(state);
+    log('info', `Check done: ${JSON.stringify(report)}`);
+    return;
+  }
+
+  if (decision.action === 'restart') {
+    log('error', `Gateway unhealthy (${decision.reason}); attempting restart`);
     const restart = restartGateway(config, state);
-    report.actions.push({ type: 'restart', trigger: 'no-process', ...restart });
+    report.actions.push({ type: 'restart', trigger: decision.reason, ...restart });
     if (!restart.success) {
       await escalate(config, state,
-        'Gateway down — restart failed',
-        `No gateway process found. Restart failed (${restart.reason}). Manual intervention needed.`
+        'Gateway identity or health check failed',
+        `Gateway check failed (${decision.reason}). Restart failed (${restart.reason}). Manual intervention needed.`
       );
       state.consecutiveFailures++;
     } else {
-      log('info', 'Gateway restarted (was not running)');
+      log('info', `Gateway restarted (${decision.reason})`);
       state.consecutiveFailures = 0;
     }
     state.lastCheck = report.ts;
@@ -450,29 +469,8 @@ async function main() {
     return;
   }
 
-  // ── Check 2: Gateway HTTP probe ──
-  const probe = await httpProbe(config);
-  report.checks.http = probe;
-
-  if (!probe.ok) {
-    log('error', `HTTP probe failed: ${probe.error || `status ${probe.statusCode}`} (${probe.ms}ms)`);
-    const restart = restartGateway(config, state);
-    report.actions.push({ type: 'restart', trigger: 'http-probe', ...restart });
-    if (!restart.success) {
-      await escalate(config, state,
-        'Gateway unresponsive — restart failed',
-        `Gateway process alive (pid ${pid}) but HTTP probe failed: ${probe.error || probe.statusCode}. Restart failed.`
-      );
-      state.consecutiveFailures++;
-    } else {
-      log('info', 'Gateway restarted (HTTP probe failed)');
-      state.consecutiveFailures = 0;
-    }
-    state.lastCheck = report.ts;
-    saveState(state);
-    log('info', `Check done: ${JSON.stringify(report)}`);
-    return;
-  }
+  state.consecutiveGatewayProbeFailures = 0;
+  const pid = identity.servicePid;
 
   // ── Check 3: File descriptors ──
   const fds = getFdCount(pid);
@@ -539,13 +537,15 @@ async function main() {
   saveState(state);
 
   const memSummary = memIssues.length > 0 ? ` mem-issues=${memIssues.length}` : ' mem=ok';
-  const summary = `pid=${pid} probe=${probe.ms}ms fds=${fds.count}/${fdCap} sessions=${sessions.length}`
+  const summary = `pid=${pid} healthz=${probes.healthz.ms}ms readyz=${probes.readyz.ms}ms fds=${fds.count}/${fdCap} sessions=${sessions.length}`
     + (sessions.length > 0 ? ` max-tokens=${Math.max(...sessions.map(s => s.percent))}%` : '')
     + memSummary;
   log('info', `OK — ${summary}`);
 }
 
-main().catch(err => {
-  log('error', `Healthcheck crashed: ${err.stack || err.message}`);
-  process.exit(1);
-});
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch(err => {
+    log('error', `Healthcheck crashed: ${err.stack || err.message}`);
+    process.exit(1);
+  });
+}

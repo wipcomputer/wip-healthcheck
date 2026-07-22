@@ -9,8 +9,8 @@ Zero npm dependencies. Runs via macOS LaunchAgent.
 
 Runs every 3 minutes and checks:
 
-1. **Gateway process** ... is `openclaw-gateway` running?
-2. **HTTP probe** ... does the gateway respond to requests?
+1. **Gateway identity** ... does the configured launchd service PID own the configured listener?
+2. **HTTP probes** ... do `/healthz` and `/readyz` return 200 within the configured timeout?
 3. **File descriptors** ... is the gateway approaching EMFILE limits?
 4. **Token usage** ... are any sessions near context window capacity?
 5. **Memory health** (every 5th run) ... NULL embedding vectors, API key errors, session export freshness, Crystal capture errors
@@ -51,7 +51,13 @@ Copy `config.example.json` to `config.json` and edit:
   "gateway": {
     "host": "127.0.0.1",
     "port": 18789,
-    "token": ""
+    "token": "",
+    "plistLabel": "ai.openclaw.gateway",
+    "processPattern": "openclaw-gateway"
+  },
+  "thresholds": {
+    "gatewayProbeFailureThreshold": 2,
+    "probeTimeoutMs": 5000
   },
   "escalation": {
     "escalationContact": "you@icloud.com",
@@ -77,6 +83,11 @@ Copy `config.example.json` to `config.json` and edit:
 | Field | What | Default |
 |-------|------|---------|
 | `gateway.token` | Gateway auth token. Auto-read from `openclaw.json` if empty. | `""` |
+| `gateway.port` | Listener port used for launchd PID ownership and HTTP probes. | `18789` |
+| `gateway.plistLabel` | launchd service label whose active PID must own the listener. | `ai.openclaw.gateway` |
+| `gateway.processPattern` | Optional command-line diagnostic. It never authorizes a restart. | `openclaw-gateway` |
+| `thresholds.gatewayProbeFailureThreshold` | Consecutive endpoint failures required before restart. | `2` |
+| `thresholds.probeTimeoutMs` | Timeout applied independently to each endpoint probe. | `5000` |
 | `escalation.escalationContact` | iMessage address for direct fallback alerts. | `""` |
 | `escalation.model` | Model string for agent messages. Empty uses gateway default. | `""` |
 | `escalation.viaAgent` | Try agent (chatCompletions) before iMessage. | `true` |
@@ -115,6 +126,8 @@ bash backup.sh              # run one backup
 bash verify-backup.sh       # verify today's backup
 ```
 
+Before enabling the watchdog after a gateway token change, run `node healthcheck.mjs --reenable-preflight` and require a zero exit plus an authenticated `/v1/models` HTTP 200. This mode never restarts the gateway. A 401 means the watchdog still has stale credentials and must remain disabled. A renamed executable or unexpected argv is diagnostic context only and does not make a healthy launchd-owned gateway restart.
+
 ## Uninstall
 
 ```bash
@@ -126,6 +139,7 @@ bash uninstall.sh           # removes healthcheck LaunchAgent
 
 ```
 healthcheck.mjs         Main watchdog script
+gateway-health.mjs      Service identity, listener ownership, and endpoint probes
 backup.sh               Daily backup script (config-driven)
 backup-wrapper.mjs      Node wrapper for backup LaunchAgent
 verify-backup.sh        Backup verification (cron)

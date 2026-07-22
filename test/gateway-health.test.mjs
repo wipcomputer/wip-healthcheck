@@ -33,6 +33,7 @@ function identity(overrides = {}) {
     serviceListenerPorts: [18889],
     configuredPortPids: [4242],
     portMatchesConfig: true,
+    inspectionError: null,
     configurationError: null,
     ownsListener: true,
     diagnosticPatternMatched: false,
@@ -75,7 +76,13 @@ test('stale or missing launchd pid is detected', () => {
 
 test('foreign listener is rejected', () => {
   const decision = decideGatewayHealth({
-    identity: identity({ configuredPortPids: [9001], ownsListener: false }),
+    identity: identity({
+      servicePid: null,
+      serviceListenerPorts: [],
+      configuredPortPids: [9001],
+      portMatchesConfig: false,
+      ownsListener: false,
+    }),
     probes: greenProbes,
   });
   assert.equal(decision.action, 'restart');
@@ -190,6 +197,119 @@ test('stale watchdog port cannot restart a healthy launchd service', () => {
     detail: result.configurationError,
     probeFailures: 0,
   });
+});
+
+test('service listener inspection failure cannot restart the gateway', () => {
+  const result = inspectGatewayIdentity(config, {
+    uid: 501,
+    run(file, args) {
+      if (file === 'launchctl') return 'pid = 4242\nstate = running';
+      if (file === 'lsof' && args.includes('-Fn')) throw new Error('lsof service query timed out');
+      if (file === 'lsof') return '4242\n';
+      if (file === 'pgrep') return '';
+      throw new Error(`unexpected command: ${file}`);
+    },
+  });
+  const decision = decideGatewayHealth({ identity: result, probes: greenProbes });
+
+  assert.match(result.inspectionError, /service listener query failed: lsof service query timed out/);
+  assert.equal(decision.action, 'inspection-error');
+  assert.equal(decision.reason, 'listener-inspection-failed');
+});
+
+test('launchd inspection failure cannot restart the gateway', () => {
+  const result = inspectGatewayIdentity(config, {
+    uid: 501,
+    run(file) {
+      if (file === 'launchctl') throw Object.assign(new Error('launchctl timed out'), { code: 'ETIMEDOUT' });
+      if (file === 'lsof') return '';
+      if (file === 'pgrep') return '';
+      throw new Error(`unexpected command: ${file}`);
+    },
+  });
+  const decision = decideGatewayHealth({ identity: result, probes: greenProbes });
+
+  assert.match(result.inspectionError, /launchd service query failed: launchctl timed out/);
+  assert.equal(decision.action, 'inspection-error');
+});
+
+test('known launchd service absence remains restartable', () => {
+  const result = inspectGatewayIdentity(config, {
+    uid: 501,
+    run(file) {
+      if (file === 'launchctl') {
+        throw Object.assign(new Error('launchctl print failed'), {
+          stderr: 'Could not find service in domain for user',
+        });
+      }
+      if (file === 'lsof') return '';
+      if (file === 'pgrep') return '';
+      throw new Error(`unexpected command: ${file}`);
+    },
+  });
+  const decision = decideGatewayHealth({ identity: result, probes: greenProbes });
+
+  assert.equal(result.inspectionError, null);
+  assert.equal(result.serviceError, 'launchd service is absent');
+  assert.equal(decision.action, 'restart');
+  assert.equal(decision.reason, 'service-absent');
+});
+
+test('configured port inspection failure cannot restart the gateway', () => {
+  const result = inspectGatewayIdentity(config, {
+    uid: 501,
+    run(file, args) {
+      if (file === 'launchctl') return 'pid = 4242\nstate = running';
+      if (file === 'lsof' && args.includes('-Fn')) return 'p4242\nn*:18889\n';
+      if (file === 'lsof') throw new Error('lsof configured port query failed');
+      if (file === 'pgrep') return '';
+      throw new Error(`unexpected command: ${file}`);
+    },
+  });
+  const decision = decideGatewayHealth({ identity: result, probes: greenProbes });
+
+  assert.match(result.inspectionError, /configured port query failed: lsof configured port query failed/);
+  assert.equal(decision.action, 'inspection-error');
+  assert.equal(decision.reason, 'listener-inspection-failed');
+});
+
+test('inconsistent listener snapshots cannot restart the gateway', () => {
+  const result = inspectGatewayIdentity(config, {
+    uid: 501,
+    run(file, args) {
+      if (file === 'launchctl') return 'pid = 4242\nstate = running';
+      if (file === 'lsof' && args.includes('-Fn')) return 'p4242\nn*:18889\n';
+      if (file === 'lsof') return '9001\n';
+      if (file === 'pgrep') return '';
+      throw new Error(`unexpected command: ${file}`);
+    },
+  });
+  const decision = decideGatewayHealth({ identity: result, probes: greenProbes });
+
+  assert.match(result.inspectionError, /listener queries disagree/);
+  assert.equal(decision.action, 'inspection-error');
+});
+
+test('lsof no-match exit remains a successful empty inspection', () => {
+  const noMatch = Object.assign(new Error('lsof exited with status 1'), {
+    status: 1,
+    stdout: '',
+    stderr: '',
+  });
+  const result = inspectGatewayIdentity(config, {
+    uid: 501,
+    run(file) {
+      if (file === 'launchctl') return 'pid = 4242\nstate = running';
+      if (file === 'lsof') throw noMatch;
+      if (file === 'pgrep') return '';
+      throw new Error(`unexpected command: ${file}`);
+    },
+  });
+  const decision = decideGatewayHealth({ identity: result, probes: greenProbes });
+
+  assert.equal(result.inspectionError, null);
+  assert.equal(decision.action, 'restart');
+  assert.equal(decision.reason, 'owned-listener-absent');
 });
 
 test('listening ports are parsed from lsof field output', () => {

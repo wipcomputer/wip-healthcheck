@@ -37,6 +37,25 @@ function parsePidList(output) {
   )];
 }
 
+function commandOutput(value) {
+  if (value === undefined || value === null) return '';
+  return Buffer.isBuffer(value) ? value.toString('utf8').trim() : String(value).trim();
+}
+
+function runLsofQuery(run, args) {
+  try {
+    return { output: run('lsof', args, 5000), error: null };
+  } catch (error) {
+    const stdout = commandOutput(error?.stdout);
+    const stderr = commandOutput(error?.stderr);
+    if (error?.status === 1 && !stdout && !stderr) {
+      return { output: '', error: null };
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return { output: '', error: stderr || message || 'unknown lsof failure' };
+  }
+}
+
 export function parseListeningPorts(output) {
   const ports = [];
   for (const line of String(output).split('\n')) {
@@ -92,35 +111,58 @@ export function inspectGatewayIdentity(config, options = {}) {
 
   let servicePid = null;
   let serviceError = null;
+  let serviceInspectionError = null;
   try {
     servicePid = parseLaunchdPid(run('launchctl', ['print', `gui/${uid}/${label}`], 5000));
     if (!servicePid) serviceError = 'launchd service has no active pid';
   } catch (error) {
-    serviceError = error instanceof Error ? error.message : String(error);
-  }
-
-  let serviceListenerPorts = [];
-  if (servicePid) {
-    try {
-      serviceListenerPorts = parseListeningPorts(
-        run('lsof', ['-nP', '-a', '-p', String(servicePid), '-iTCP', '-sTCP:LISTEN', '-Fn'], 5000),
-      );
-    } catch {
-      serviceListenerPorts = [];
+    const stderr = commandOutput(error?.stderr);
+    const message = stderr || (error instanceof Error ? error.message : String(error));
+    if (/could not find service|service not found/iu.test(message)) {
+      serviceError = 'launchd service is absent';
+    } else {
+      serviceInspectionError = message || 'unknown launchd inspection failure';
     }
   }
 
-  let configuredPortPids = [];
-  try {
-    configuredPortPids = parsePidList(
-      run('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], 5000),
+  let serviceListenerPorts = [];
+  let serviceListenerError = null;
+  if (servicePid) {
+    const result = runLsofQuery(
+      run,
+      ['-nP', '-a', '-p', String(servicePid), '-iTCP', '-sTCP:LISTEN', '-Fn'],
     );
-  } catch {
-    configuredPortPids = [];
+    serviceListenerPorts = parseListeningPorts(result.output);
+    serviceListenerError = result.error;
   }
 
+  const configuredPortResult = runLsofQuery(
+    run,
+    ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'],
+  );
+  const configuredPortPids = parsePidList(configuredPortResult.output);
+  const configuredPortError = configuredPortResult.error;
+
   const portMatchesConfig = serviceListenerPorts.includes(port);
-  const configurationError = servicePid && serviceListenerPorts.length > 0 && !portMatchesConfig
+  const configuredPortOwnedByService = servicePid !== null && configuredPortPids.includes(servicePid);
+  const inspectionErrors = [
+    serviceInspectionError ? `launchd service query failed: ${serviceInspectionError}` : null,
+    serviceListenerError ? `service listener query failed: ${serviceListenerError}` : null,
+    configuredPortError ? `configured port query failed: ${configuredPortError}` : null,
+  ].filter(Boolean);
+  const snapshotInconsistent = servicePid !== null
+    && inspectionErrors.length === 0
+    && portMatchesConfig !== configuredPortOwnedByService;
+  if (snapshotInconsistent) {
+    inspectionErrors.push(
+      `listener queries disagree about whether service pid ${servicePid} owns configured port ${port}`,
+    );
+  }
+  const inspectionError = inspectionErrors.length > 0 ? inspectionErrors.join('; ') : null;
+  const configurationError = !inspectionError
+    && servicePid
+    && serviceListenerPorts.length > 0
+    && !portMatchesConfig
     ? `configured gateway port ${port} does not match launchd service listener(s): ${serviceListenerPorts.join(', ')}`
     : null;
 
@@ -142,11 +184,18 @@ export function inspectGatewayIdentity(config, options = {}) {
     port,
     servicePid,
     serviceError,
+    serviceInspectionError,
     serviceListenerPorts,
+    serviceListenerError,
     configuredPortPids,
+    configuredPortError,
     portMatchesConfig,
+    inspectionError,
     configurationError,
-    ownsListener: servicePid !== null && portMatchesConfig && configuredPortPids.includes(servicePid),
+    ownsListener: servicePid !== null
+      && !inspectionError
+      && portMatchesConfig
+      && configuredPortOwnedByService,
     processPattern: processPattern || null,
     diagnosticPatternMatched,
   };
@@ -215,6 +264,14 @@ export function decideGatewayHealth(params) {
     probeFailureThreshold = 2,
   } = params;
 
+  if (identity.inspectionError) {
+    return {
+      action: 'inspection-error',
+      reason: 'listener-inspection-failed',
+      detail: identity.inspectionError,
+      probeFailures: 0,
+    };
+  }
   if (identity.configurationError) {
     return {
       action: 'configuration-error',

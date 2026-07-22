@@ -454,8 +454,8 @@ async function main() {
     return;
   }
 
-  if (decision.action === 'configuration-error') {
-    log('error', `Gateway configuration error (${decision.detail}); remediation disabled`);
+  if (decision.action === 'configuration-error' || decision.action === 'inspection-error') {
+    log('error', `Gateway ${decision.action} (${decision.detail}); remediation disabled`);
     state.consecutiveGatewayProbeFailures = 0;
     state.consecutiveFailures++;
     state.lastCheck = report.ts;

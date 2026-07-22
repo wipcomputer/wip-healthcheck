@@ -30,7 +30,9 @@ cp config.example.json config.json
 bash install.sh
 ```
 
-This atomically installs the runtime modules under `~/.openclaw/wip-healthcheck/runtime/`, preserves the existing configuration at mode `0600`, runs an authenticated non-remediating preflight, and then loads a LaunchAgent that runs every 3 minutes. launchd never executes a repository or worktree path.
+This atomically installs the runtime modules under `~/.openclaw/wip-healthcheck/runtime/`, preserves the existing configuration at mode `0600`, audits every executable required by scheduled checks, runs an authenticated non-remediating preflight under the exact LaunchAgent environment, and then loads a LaunchAgent that runs every 3 minutes. launchd never executes a repository or worktree path.
+
+The scheduled environment uses `PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`. Installation fails before unloading an existing service if `id`, `launchctl`, `lsof`, `pgrep`, `openclaw`, `sqlite3`, `tail`, `grep`, `ls`, `head`, `osascript`, `sleep`, or `wc` cannot be resolved through that path. The generated plist and authenticated preflight use the same `HOME`, `OPENCLAW_HOME`, `PATH`, and `WIP_HEALTHCHECK_HOME` values.
 
 ### Backup system (optional)
 
@@ -126,7 +128,7 @@ bash backup.sh              # run one backup
 bash verify-backup.sh       # verify today's backup
 ```
 
-Before enabling the watchdog after a gateway token change, run the installed runtime with `WIP_HEALTHCHECK_HOME=~/.openclaw/wip-healthcheck node ~/.openclaw/wip-healthcheck/runtime/<release>/healthcheck.mjs --reenable-preflight` and require a zero exit plus an authenticated `/v1/models` HTTP 200. This mode never restarts the gateway. A 401 means the watchdog still has stale credentials and must remain disabled. A stale configured port is also non-remediating: the operator must reconcile it with the active launchd service listener. A renamed executable or unexpected argv is diagnostic context only and does not make a healthy launchd-owned gateway restart.
+Before enabling the watchdog after a gateway token change, rerun the installer and require its scheduled-environment preflight to exit zero plus return an authenticated `/v1/models` HTTP 200. Do not substitute an interactive-shell invocation because its broader environment can hide missing LaunchAgent executables. This mode never restarts the gateway. A 401 means the watchdog still has stale credentials and must remain disabled. A stale configured port is also non-remediating: the operator must reconcile it with the active launchd service listener. A renamed executable or unexpected argv is diagnostic context only and does not make a healthy launchd-owned gateway restart.
 
 ## Uninstall
 

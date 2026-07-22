@@ -1,0 +1,3 @@
+wip-healthcheck now discovers listener ports from the configured launchd service PID and compares them with the watchdog configuration. A stale configured port or malformed configuration fails closed without restarting a healthy gateway. Process-name matching remains diagnostic-only. Endpoint failures still require the configured consecutive-failure threshold, while genuine missing-service and listener failures remain subject to the restart rate limit.
+
+The installer stages both runtime modules atomically under `~/.openclaw/wip-healthcheck/`, preserves the existing mode-`0600` configuration, points launchd at the installed runtime, and requires an authenticated non-remediating preflight before re-enablement.

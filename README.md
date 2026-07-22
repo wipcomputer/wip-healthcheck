@@ -9,8 +9,8 @@ Zero npm dependencies. Runs via macOS LaunchAgent.
 
 Runs every 3 minutes and checks:
 
-1. **Gateway process** ... is `openclaw-gateway` running?
-2. **HTTP probe** ... does the gateway respond to requests?
+1. **Gateway identity** ... which TCP port does the active launchd service PID own, and does it match the configured port?
+2. **HTTP probes** ... do `/healthz` and `/readyz` return 200 within the configured timeout?
 3. **File descriptors** ... is the gateway approaching EMFILE limits?
 4. **Token usage** ... are any sessions near context window capacity?
 5. **Memory health** (every 5th run) ... NULL embedding vectors, API key errors, session export freshness, Crystal capture errors
@@ -30,7 +30,7 @@ cp config.example.json config.json
 bash install.sh
 ```
 
-This installs a LaunchAgent that runs the healthcheck every 3 minutes.
+This atomically installs the runtime modules under `~/.openclaw/wip-healthcheck/runtime/`, preserves the existing configuration at mode `0600`, runs an authenticated non-remediating preflight, and then loads a LaunchAgent that runs every 3 minutes. launchd never executes a repository or worktree path.
 
 ### Backup system (optional)
 
@@ -51,7 +51,13 @@ Copy `config.example.json` to `config.json` and edit:
   "gateway": {
     "host": "127.0.0.1",
     "port": 18789,
-    "token": ""
+    "token": "",
+    "plistLabel": "ai.openclaw.gateway",
+    "processPattern": "openclaw-gateway"
+  },
+  "thresholds": {
+    "gatewayProbeFailureThreshold": 2,
+    "probeTimeoutMs": 5000
   },
   "escalation": {
     "escalationContact": "you@icloud.com",
@@ -77,6 +83,11 @@ Copy `config.example.json` to `config.json` and edit:
 | Field | What | Default |
 |-------|------|---------|
 | `gateway.token` | Gateway auth token. Auto-read from `openclaw.json` if empty. | `""` |
+| `gateway.port` | Expected listener port. A mismatch with the active launchd service PID fails closed without restarting it. | `18789` |
+| `gateway.plistLabel` | launchd service label whose active PID must own the listener. | `ai.openclaw.gateway` |
+| `gateway.processPattern` | Optional command-line diagnostic. It never authorizes a restart. | `openclaw-gateway` |
+| `thresholds.gatewayProbeFailureThreshold` | Consecutive endpoint failures required before restart. | `2` |
+| `thresholds.probeTimeoutMs` | Timeout applied independently to each endpoint probe. | `5000` |
 | `escalation.escalationContact` | iMessage address for direct fallback alerts. | `""` |
 | `escalation.model` | Model string for agent messages. Empty uses gateway default. | `""` |
 | `escalation.viaAgent` | Try agent (chatCompletions) before iMessage. | `true` |
@@ -115,6 +126,8 @@ bash backup.sh              # run one backup
 bash verify-backup.sh       # verify today's backup
 ```
 
+Before enabling the watchdog after a gateway token change, run the installed runtime with `WIP_HEALTHCHECK_HOME=~/.openclaw/wip-healthcheck node ~/.openclaw/wip-healthcheck/runtime/<release>/healthcheck.mjs --reenable-preflight` and require a zero exit plus an authenticated `/v1/models` HTTP 200. This mode never restarts the gateway. A 401 means the watchdog still has stale credentials and must remain disabled. A stale configured port is also non-remediating: the operator must reconcile it with the active launchd service listener. A renamed executable or unexpected argv is diagnostic context only and does not make a healthy launchd-owned gateway restart.
+
 ## Uninstall
 
 ```bash
@@ -126,6 +139,7 @@ bash uninstall.sh           # removes healthcheck LaunchAgent
 
 ```
 healthcheck.mjs         Main watchdog script
+gateway-health.mjs      Service identity, listener ownership, and endpoint probes
 backup.sh               Daily backup script (config-driven)
 backup-wrapper.mjs      Node wrapper for backup LaunchAgent
 verify-backup.sh        Backup verification (cron)

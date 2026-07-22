@@ -32,6 +32,8 @@ function identity(overrides = {}) {
     servicePid: 4242,
     serviceListenerPorts: [18889],
     configuredPortPids: [4242],
+    foreignListenerPids: [],
+    foreignListenerError: null,
     portMatchesConfig: true,
     inspectionError: null,
     configurationError: null,
@@ -80,13 +82,40 @@ test('foreign listener is rejected', () => {
       servicePid: null,
       serviceListenerPorts: [],
       configuredPortPids: [9001],
+      foreignListenerPids: [9001],
+      foreignListenerError: 'configured gateway port 18889 is also owned by foreign pid(s): 9001',
       portMatchesConfig: false,
       ownsListener: false,
     }),
     probes: greenProbes,
   });
-  assert.equal(decision.action, 'restart');
+  assert.equal(decision.action, 'inspection-error');
   assert.equal(decision.reason, 'foreign-listener');
+});
+
+test('configured port co-ownership fails closed without restart authority', () => {
+  const result = inspectGatewayIdentity(config, {
+    uid: 501,
+    run(file, args) {
+      if (file === 'launchctl') return 'pid = 4242\nstate = running';
+      if (file === 'lsof' && args.includes('-Fn')) return 'p4242\nn*:18889\n';
+      if (file === 'lsof') return '4242\n9001\n';
+      if (file === 'pgrep') return '';
+      throw new Error(`unexpected command: ${file}`);
+    },
+  });
+  const decision = decideGatewayHealth({ identity: result, probes: greenProbes });
+
+  assert.deepEqual(result.configuredPortPids, [4242, 9001]);
+  assert.deepEqual(result.foreignListenerPids, [9001]);
+  assert.equal(result.ownsListener, false);
+  assert.deepEqual(decision, {
+    action: 'inspection-error',
+    reason: 'foreign-listener',
+    detail: 'configured gateway port 18889 is also owned by foreign pid(s): 9001',
+    probeFailures: 0,
+  });
+  assert.notEqual(decision.action, 'restart');
 });
 
 test('failed probes restart only at the configured threshold', () => {

@@ -145,6 +145,10 @@ export function inspectGatewayIdentity(config, options = {}) {
 
   const portMatchesConfig = serviceListenerPorts.includes(port);
   const configuredPortOwnedByService = servicePid !== null && configuredPortPids.includes(servicePid);
+  const foreignListenerPids = configuredPortPids.filter((pid) => pid !== servicePid);
+  const foreignListenerError = foreignListenerPids.length > 0
+    ? `configured gateway port ${port} is also owned by foreign pid(s): ${foreignListenerPids.join(', ')}`
+    : null;
   const inspectionErrors = [
     serviceInspectionError ? `launchd service query failed: ${serviceInspectionError}` : null,
     serviceListenerError ? `service listener query failed: ${serviceListenerError}` : null,
@@ -189,11 +193,14 @@ export function inspectGatewayIdentity(config, options = {}) {
     serviceListenerError,
     configuredPortPids,
     configuredPortError,
+    foreignListenerPids,
+    foreignListenerError,
     portMatchesConfig,
     inspectionError,
     configurationError,
     ownsListener: servicePid !== null
       && !inspectionError
+      && !foreignListenerError
       && portMatchesConfig
       && configuredPortOwnedByService,
     processPattern: processPattern || null,
@@ -272,6 +279,14 @@ export function decideGatewayHealth(params) {
       probeFailures: 0,
     };
   }
+  if (identity.foreignListenerError) {
+    return {
+      action: 'inspection-error',
+      reason: 'foreign-listener',
+      detail: identity.foreignListenerError,
+      probeFailures: 0,
+    };
+  }
   if (identity.configurationError) {
     return {
       action: 'configuration-error',
@@ -281,9 +296,6 @@ export function decideGatewayHealth(params) {
     };
   }
   if (!identity.servicePid) {
-    if (identity.configuredPortPids.length > 0) {
-      return { action: 'restart', reason: 'foreign-listener', probeFailures: 0 };
-    }
     return { action: 'restart', reason: 'service-absent', probeFailures: 0 };
   }
   if (identity.serviceListenerPorts.length === 0) {

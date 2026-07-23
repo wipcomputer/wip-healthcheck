@@ -6,13 +6,39 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LABEL="ai.openclaw.healthcheck"
 PLIST_DST="$HOME/Library/LaunchAgents/$LABEL.plist"
 NODE_PATH="$(command -v node)"
-INSTALL_ROOT="${OPENCLAW_HOME:-$HOME/.openclaw}/wip-healthcheck"
+SCHEDULED_OPENCLAW_HOME="${OPENCLAW_HOME:-$HOME/.openclaw}"
+SCHEDULED_PATH="${WIP_HEALTHCHECK_SCHEDULED_PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
+INSTALL_ROOT="$SCHEDULED_OPENCLAW_HOME/wip-healthcheck"
 RUNTIME_ROOT="$INSTALL_ROOT/runtime"
 RELEASE_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 STAGE_DIR="$RUNTIME_ROOT/.staging-$RELEASE_ID"
 RELEASE_DIR="$RUNTIME_ROOT/$RELEASE_ID"
 SCRIPT_PATH="$RELEASE_DIR/healthcheck.mjs"
 LOG_DIR="$HOME/.ldm/logs"
+
+REQUIRED_SCHEDULED_EXECUTABLES=(
+  id
+  launchctl
+  lsof
+  pgrep
+  openclaw
+  sqlite3
+  tail
+  grep
+  ls
+  head
+  osascript
+  sleep
+  wc
+)
+
+for executable in "${REQUIRED_SCHEDULED_EXECUTABLES[@]}"; do
+  if ! resolved="$(PATH="$SCHEDULED_PATH" command -v "$executable")"; then
+    echo "Scheduled environment missing required executable: $executable" >&2
+    exit 1
+  fi
+  printf 'Scheduled executable: %s=%s\n' "$executable" "$resolved"
+done
 
 mkdir -p "$LOG_DIR" "$HOME/Library/LaunchAgents" "$INSTALL_ROOT" "$RUNTIME_ROOT"
 chmod 700 "$INSTALL_ROOT" "$RUNTIME_ROOT"
@@ -56,7 +82,11 @@ cat > "$PLIST_TMP" << EOF
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>$SCHEDULED_PATH</string>
+        <key>HOME</key>
+        <string>$HOME</string>
+        <key>OPENCLAW_HOME</key>
+        <string>$SCHEDULED_OPENCLAW_HOME</string>
         <key>WIP_HEALTHCHECK_HOME</key>
         <string>$INSTALL_ROOT</string>
     </dict>
@@ -66,7 +96,12 @@ cat > "$PLIST_TMP" << EOF
 </plist>
 EOF
 
-WIP_HEALTHCHECK_HOME="$INSTALL_ROOT" "$NODE_PATH" "$SCRIPT_PATH" --reenable-preflight
+/usr/bin/env -i \
+  HOME="$HOME" \
+  OPENCLAW_HOME="$SCHEDULED_OPENCLAW_HOME" \
+  PATH="$SCHEDULED_PATH" \
+  WIP_HEALTHCHECK_HOME="$INSTALL_ROOT" \
+  "$NODE_PATH" "$SCRIPT_PATH" --reenable-preflight
 mv -f "$PLIST_TMP" "$PLIST_DST"
 PLIST_TMP=""
 launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"

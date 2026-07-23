@@ -1,6 +1,6 @@
 {
   "name": "wip-healthcheck",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "External health watchdog + backup system. Monitors gateway, tokens, memory. Auto-remediates and escalates.",
   "type": "module",
   "main": "healthcheck.mjs",
